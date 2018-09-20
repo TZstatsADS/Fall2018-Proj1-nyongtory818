@@ -1,18 +1,202 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "What make people happy?"
+output:
+  html_document:
+    df_print: paged
 ---
 
-This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
 
-Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
 
-```{r}
-plot(cars)
+## 0. Load all the required libraries 
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(NLP)
+library(tm)
+library(dplyr)
+library(topicmodels)
+library(ngram)
+library(wordcloud)
+library(DT)
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+## 1. Load the processed text data along with demographic information on contributors
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+We use the processed data for our analysis and combine it with the demographic information available.
+```{r load data, warning=FALSE, message=FALSE}
+hm_data <- read_csv("../output/processed_moments.csv")
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+urlfile<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/demographic.csv'
+demo_data <- read_csv(urlfile)
+```
+
+### Combine both the data sets and keep the required columns for analysis
+We select a subset of the data that satisfies specific row conditions.
+```{r combining data, warning=FALSE, message=FALSE}
+hm_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(wid,
+         original_hm,
+         gender, 
+         marital, 
+         parenthood,
+         reflection_period,
+         age, 
+         country, 
+         ground_truth_category, 
+         text) %>%
+  mutate(count = sapply(hm_data$text, wordcount)) %>%
+  filter(gender %in% c("m", "f")) %>%
+  filter(marital %in% c("single", "married")) %>%
+  filter(parenthood %in% c("n", "y")) %>%
+  filter(reflection_period %in% c("24h", "3m")) %>%
+  mutate(reflection_period = fct_recode(reflection_period, 
+                                        months_3 = "3m", hours_24 = "24h"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+datatable(hm_data)
+```
+
+## 2. Generate the Word cloud
+The importance of words can be illustrated as a word cloud as follow :
+```{r, warning=FALSE, message=FALSE}
+wordcloud(hm_data$text, min.freq = 1000, max.words=200, random.order=FALSE,
+          rot.per=0.35, colors=brewer.pal(8, "Dark2"))
+```
+The above word cloud clearly shows that "friend", "day", "time", "family" and "home" are the main words people think about when asked about happy moments. I think most people like to spend time with family and friends. There are also words like "buy", "trip", "movie", "book" that matters. So entertainments also maake people happy, but they are not as important as family and friends. 
+
+## 3. Explore the difference of reasons based on reflection period
+
+We divide the whole data into to groups, with reflection period 3 months and 24 hours, respectively. We want to explore whether there are different reasons that makes people happy.
+```{r}
+month <- hm_data[hm_data$reflection_period == "months_3",]
+day <- hm_data[hm_data$reflection_period == "hours_24",]
+```
+
+### 3.1 3 months reflection period
+Load the data as a corpus.
+```{r}
+docs.m <- list()
+gender <- unique(day$gender)
+
+# create list of documents for different gender to HappyDB
+for (i in gender) {
+  docs.m[[i]] <- as.vector(month[which(month$gender==i), "text"])
+}
+
+#create corpus from vector
+docs.m <- Corpus(VectorSource(docs.m))
+```
+
+#### The frequency table of words
+```{r}
+# Build a term-document matrix
+dtm2 <- TermDocumentMatrix(docs.m)
+m2 <- as.matrix(dtm2)
+v2 <- sort(rowSums(m2),decreasing=TRUE)
+d2 <- data.frame(word = names(v2),freq=v2)
+head(d2, 10)
+```
+
+#### Plot word frequencies
+The frequency of the first 15 frequent words are plotted :
+```{r}
+barplot(d2[1:20,]$freq, las = 2, names.arg = d2[1:20,]$word,
+        col ="lightblue", main ="Most frequent words in last_3_month",
+        ylab = "Word frequencies")
+```
+
+### 3.2 24-hours reflection period
+Load the data as a corpus.
+```{r}
+docs.d <- list()
+gender <- unique(day$gender)
+
+# create list of documents for different gender to HappyDB
+for (i in gender) {
+  docs.d[[i]] <- as.vector(day[which(day$gender==i), "text"])
+}
+
+#create corpus from vector
+docs.d <- Corpus(VectorSource(docs.d))
+```
+
+#### The frequency table of words
+```{r}
+# Build a term-document matrix
+dtm <- TermDocumentMatrix(docs.d)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+head(d, 10)
+```
+
+#### Plot word frequencies
+The frequency of the first 15 frequent words are plotted :
+```{r}
+barplot(d[1:20,]$freq, las = 2, names.arg = d[1:20,]$word,
+        col ="lightblue", main ="Most frequent words in last_24_hours",
+        ylab = "Word frequencies")
+```
+
+### 3.3 Conclusion
+Except the three most frequent words, "friend","day","time" in both groups, we see the difference between the groups. In the long period, words like "job", "birthday", "life", "event" appears more. Meanwhile in the one day reflection time, "dinner", "game", "morning", "game" makes people happy.
+
+We can conclude from the difference that reaching a goal (like finding jobs), special anniversary or events(like birthday) are unforgettable happy moments for people. But in a short period like 1 day, entertainments (like "watched","played","game") and some daily activities (like "night","dinner","morning") make people happy.
+
+## 4. Topic modeling
+In this section we want to summarize some topic from the happy moments for different gender and see whether we can distinguish the gender of the people base on their topics.
+```{r}
+docs.l <- list()
+memberlist <- unique(hm_data$gender)
+
+# create list of documents for different gender to HappyDB
+for (id in memberlist) {
+  docs.l[[id]] <- as.vector(hm_data[which(hm_data$gender==id), "text"])
+}
+
+#create corpus from vector
+docs <- Corpus(VectorSource(docs.l))
+#Create document-term matrix
+dtm.g <- DocumentTermMatrix(docs)
+```
+
+### 4.1 Run LDA
+```{r}
+#Set parameters for Gibbs sampling
+burnin <- 4000
+iter <- 2000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+#Number of topics
+k <- 2
+```
+
+```{r}
+#Run LDA using Gibbs sampling
+ldaOut <-LDA(dtm.g,k, method="Gibbs", control=list(nstart=nstart, seed = seed, 
+                                                 best=best, burnin = burnin, 
+                                                 iter = iter, thin=thin))
+```
+
+```{r}
+#top 10 terms in each topic
+ldaOut.terms <- as.matrix(terms(ldaOut,10))
+ldaOut.terms
+```
+
+
+```{r}
+#probabilities associated with each topic assignment
+topicProbabilities <- as.data.frame(ldaOut@gamma)
+colnames(topicProbabilities) <- c("Topic 1", "Topic 2")
+topicProbabilities
+```
+
+## 4.2 Conclusion
+From the words in 2 topics, we can see that there are some repeated words. From the different words and topic probabilities we can easily find out that topic 1 is from male and topic 2 from female because words like "girlfriend", "husband". Here we ignore the repeated words and only analyze on the difference between men and women.
+
+Based on the words from topic 1 like "game", "watched", "night", we can see entertainments make men happy. And the words from topic 2 like "son", "daughter", "family", "love", we can see family and relationships make women happy.
+
